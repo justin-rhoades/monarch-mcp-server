@@ -835,3 +835,113 @@ class TestGetAuthenticatedClient:
     def test_no_session_returns_none(self, storage_keyring):
         session, _ = storage_keyring
         assert session.get_authenticated_client() is None
+
+
+class TestEnvironmentSession:
+    """MONARCH_MCP_SESSION feeds hosts with no keyring and no durable disk."""
+
+    COOKIE_BLOB = json.dumps(
+        {
+            "auth_mode": "cookie",
+            "token": "tok",
+            "device_uuid": "dev-1",
+            "cookies": {"session_id": "s", "csrftoken": "c"},
+        }
+    )
+
+    def test_loads_when_nothing_else_is_stored(self, file_session, monkeypatch):
+        session, _ = file_session
+        monkeypatch.setenv(ss_module.SESSION_ENV_VAR, self.COOKIE_BLOB)
+        loaded = session.load_session()
+        assert loaded == {
+            "auth_mode": "cookie",
+            "token": "tok",
+            "device_uuid": "dev-1",
+            "cookies": {"session_id": "s", "csrftoken": "c"},
+        }
+
+    def test_saved_session_takes_precedence(self, file_session, monkeypatch):
+        """A login inside the running server must win over the injected one,
+        otherwise re-authenticating could never replace an expired secret."""
+        session, _ = file_session
+        monkeypatch.setenv(ss_module.SESSION_ENV_VAR, self.COOKIE_BLOB)
+        session.save_token("fresh", device_uuid="dev-2")
+        loaded = session.load_session()
+        assert loaded["token"] == "fresh"
+        assert loaded["device_uuid"] == "dev-2"
+
+    def test_unusable_value_is_ignored(self, file_session, monkeypatch):
+        session, _ = file_session
+        monkeypatch.setenv(ss_module.SESSION_ENV_VAR, '{"token": "trunc')
+        assert session.load_session() is None
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_blank_value_means_absent(self, file_session, monkeypatch, value):
+        session, _ = file_session
+        monkeypatch.setenv(ss_module.SESSION_ENV_VAR, value)
+        assert session.load_session() is None
+        assert session.env_session_present() is False
+
+    def test_builds_authenticated_client(self, file_session, monkeypatch):
+        session, _ = file_session
+        monkeypatch.setenv(ss_module.SESSION_ENV_VAR, self.COOKIE_BLOB)
+        factory = MagicMock()
+        monkeypatch.setattr(ss_module, "create_monarch_client", factory)
+        client = session.get_authenticated_client()
+        assert client is factory.return_value
+        factory.assert_called_once_with(token="tok", device_uuid="dev-1")
+        client.set_cookies.assert_called_once_with(
+            {"session_id": "s", "csrftoken": "c"}
+        )
+
+    def test_export_round_trips(self, file_session, monkeypatch, capsys):
+        """export_session.py output, fed back through the environment,
+        yields the same session that was saved."""
+        import importlib.util
+        from pathlib import Path
+
+        session, _ = file_session
+        session.save_session_blob(
+            token="tok",
+            device_uuid="dev-1",
+            cookies={"session_id": "s", "csrftoken": "c"},
+            auth_mode="cookie",
+        )
+        saved = session.load_session()
+
+        spec = importlib.util.spec_from_file_location(
+            "export_session",
+            Path(__file__).resolve().parent.parent / "export_session.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        monkeypatch.setattr(module, "secure_session", session)
+        monkeypatch.setattr(sys, "argv", ["export_session.py"])
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+        assert module.main() == 0
+        exported = capsys.readouterr().out
+
+        session.delete_token()
+        assert session.load_session() is None
+        monkeypatch.setenv(ss_module.SESSION_ENV_VAR, exported)
+        assert session.load_session() == saved
+
+    def test_export_refuses_terminal(self, file_session, monkeypatch, capsys):
+        import importlib.util
+        from pathlib import Path
+
+        session, _ = file_session
+        session.save_token("tok")
+        spec = importlib.util.spec_from_file_location(
+            "export_session",
+            Path(__file__).resolve().parent.parent / "export_session.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        monkeypatch.setattr(module, "secure_session", session)
+        monkeypatch.setattr(sys, "argv", ["export_session.py"])
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        assert module.main() == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "tok" not in captured.err

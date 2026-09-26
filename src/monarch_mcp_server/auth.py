@@ -133,4 +133,11 @@ async def logout() -> str:
     # Authorization header, so without dropping the cache every tool call after
     # a logout still returns live financial data for the life of the process.
     clear_client_cache()
+    if secure_session.env_session_present():
+        return (
+            "Cleared stored Monarch session, but a session is still supplied "
+            "through the MONARCH_MCP_SESSION environment variable and remains "
+            "active. Remove that variable (or its secret) and restart the "
+            "server to sign out fully."
+        )
     return "Cleared stored Monarch session."

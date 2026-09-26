@@ -334,6 +334,108 @@ docker run --rm -i \
   monarch-mcp-server
 ```
 
+### Host on Google Cloud Run
+
+Cloud Run gives you an HTTPS URL reachable from anywhere, and a single person's
+occasional use stays inside its Always Free allowance. It also has no keyring
+and no durable disk, and the URL is public, so two settings replace the session
+volume and the reverse proxy used above:
+
+- `MONARCH_MCP_SESSION` supplies the saved session, exported from a machine
+  where you have already logged in and stored in Secret Manager.
+- `MONARCH_MCP_AUTH_TOKEN` makes the server reject every request that does not
+  carry `Authorization: Bearer <token>`. Without it, anyone who finds the URL
+  can read and change your accounts.
+
+You need a Google Cloud project with billing enabled (Google requires a card
+even for free-tier use) and the [gcloud CLI](https://cloud.google.com/sdk/docs/install)
+logged in to it.
+
+1. Log in locally first, following [One-Time Authentication Setup](#2-one-time-authentication-setup).
+
+2. Enable the services and set a region (`us-central1` is inside the free tier):
+
+   ```bash
+   gcloud config set project YOUR_PROJECT_ID
+   gcloud config set run/region us-central1
+   gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+     artifactregistry.googleapis.com secretmanager.googleapis.com
+   ```
+
+3. Store the session and a fresh bearer token as secrets. Both are piped
+   straight in, so neither is written to disk or your terminal:
+
+   ```bash
+   uv run --locked python export_session.py \
+     | gcloud secrets create monarch-session --data-file=-
+   openssl rand -hex 32 | tr -d '\n' \
+     | gcloud secrets create monarch-mcp-token --data-file=-
+   ```
+
+4. Let the service read them. Cloud Run runs as the project's default compute
+   service account unless you choose another:
+
+   ```bash
+   SA="$(gcloud projects describe "$(gcloud config get project)" \
+     --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
+   for secret in monarch-session monarch-mcp-token; do
+     gcloud secrets add-iam-policy-binding "$secret" \
+       --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor
+   done
+   ```
+
+5. Build this repository's Dockerfile and deploy it:
+
+   ```bash
+   gcloud run deploy monarch-mcp --source . --port 8000 \
+     --max-instances 1 --allow-unauthenticated \
+     --set-secrets MONARCH_MCP_SESSION=monarch-session:latest,MONARCH_MCP_AUTH_TOKEN=monarch-mcp-token:latest \
+     --set-env-vars MONARCH_MCP_READ_ONLY=true
+   ```
+
+   `--allow-unauthenticated` only lets requests reach the container; the bearer
+   token is what authenticates them. `--max-instances 1` keeps MCP sessions on
+   one instance, since they live in memory. Do not set `--min-instances`: an
+   always-on instance uses far more than the free allowance. Drop
+   `MONARCH_MCP_READ_ONLY` if you want the write tools.
+
+6. Allow the service's hostname through Host validation:
+
+   ```bash
+   URL="$(gcloud run services describe monarch-mcp --format='value(status.url)')"
+   gcloud run services update monarch-mcp \
+     --update-env-vars "MONARCH_MCP_ALLOWED_HOSTS=${URL#https://}"
+   echo "$URL/mcp"
+   ```
+
+7. Point your client at that `/mcp` URL with the token as a header. For Claude
+   Code:
+
+   ```bash
+   claude mcp add --transport http monarch "$URL/mcp" \
+     --header "Authorization: Bearer $(gcloud secrets versions access latest --secret monarch-mcp-token)"
+   ```
+
+   The client must be able to send a custom header. Clients that only support
+   OAuth for remote servers cannot use this setup.
+
+When the Monarch session eventually stops working, log in locally again and
+roll the secret; new instances pick up the latest version:
+
+```bash
+uv run --locked python export_session.py \
+  | gcloud secrets versions add monarch-session --data-file=-
+gcloud run services update monarch-mcp --update-labels "session-rotated=$(date +%s)"
+```
+
+The service scales to zero when idle, which is what keeps it free. The first
+request after a quiet spell takes a few seconds, and a client holding an old
+MCP session is asked to reconnect. The login tools do run on Cloud Run, but a
+session they save lasts only as long as that instance; rolling the secret is
+the durable way to re-authenticate. `monarch_logout` cannot remove the
+injected session either: delete the service or its `monarch-session` secret to
+revoke access.
+
 ## HTTP Transport Configuration
 
 The server supports MCP Streamable HTTP at `/mcp` but only when explicitly selected:
@@ -351,6 +453,8 @@ Connect an MCP client using Streamable HTTP to `http://127.0.0.1:8000/mcp`.
 | Listen port                        | `--port`                        | `MONARCH_MCP_PORT`                              | `8000`                                         |
 | Additional allowed Host headers    | `--allowed-host` (repeatable)   | `MONARCH_MCP_ALLOWED_HOSTS` (comma-separated)   | None; loopback hosts are always allowed        |
 | Additional allowed browser Origins | `--allowed-origin` (repeatable) | `MONARCH_MCP_ALLOWED_ORIGINS` (comma-separated) | None; HTTP loopback origins are always allowed |
+| Required bearer token              | None (environment only)         | `MONARCH_MCP_AUTH_TOKEN` (32+ characters)       | None; requests are not authenticated           |
+| Session when none is stored        | None (environment only)         | `MONARCH_MCP_SESSION` (from `export_session.py`) | None                                           |
 
 CLI flags override their environment settings.
 Host entries include the port when clients send one; `server.lan:*` allows any port.
