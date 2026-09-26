@@ -18,6 +18,7 @@ def isolate_transport(monkeypatch):
         "ALLOWED_HOSTS",
         "ALLOWED_ORIGINS",
         "AUTH_TOKEN",
+        "AUTH_TOKEN_IN_PATH",
     ):
         monkeypatch.delenv(f"MONARCH_MCP_{suffix}", raising=False)
     monkeypatch.setattr(app.mcp, "settings", app.mcp.settings.model_copy(deep=True))
@@ -304,6 +305,86 @@ def test_bearer_auth_keeps_host_validation():
                 "Authorization": f"Bearer {TOKEN}",
                 "Host": "evil.example",
             },
+            json=INITIALIZE,
+        )
+        assert response.status_code == 421
+
+
+@pytest.mark.parametrize("enabled", [("true", True), ("", False)])
+def test_path_token_setting_reaches_app(monkeypatch, isolate_transport, enabled):
+    import uvicorn
+
+    value, expected = enabled
+    served = Mock()
+    monkeypatch.setattr(uvicorn, "run", served)
+    monkeypatch.setenv("MONARCH_MCP_AUTH_TOKEN", TOKEN)
+    monkeypatch.setenv("MONARCH_MCP_AUTH_TOKEN_IN_PATH", value)
+    app.main(["--transport", "http"])
+    assert served.call_args.args[0]._allow_path is expected
+    # The access log would print a path-embedded token.
+    assert served.call_args.kwargs["access_log"] is not expected
+
+
+def test_path_token_accepted_when_enabled():
+    app.main(["--transport", "http"])
+    with TestClient(
+        app.build_http_app(TOKEN, allow_path_token=True),
+        base_url="http://localhost:8000",
+    ) as client:
+        response = client.post(f"/{TOKEN}/mcp", headers=HEADERS, json=INITIALIZE)
+        assert rpc_result(response)["serverInfo"]["name"] == (
+            "Monarch Money MCP Server"
+        )
+        # The header still works alongside it.
+        response = client.post(
+            "/mcp",
+            headers={**HEADERS, "Authorization": f"Bearer {TOKEN}"},
+            json=INITIALIZE,
+        )
+        assert "serverInfo" in rpc_result(response)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/mcp",
+        f"/{TOKEN}",
+        f"/{TOKEN[:-1]}/mcp",
+        f"/{TOKEN}x/mcp",
+        f"/x{TOKEN}/mcp",
+        f"/mcp/{TOKEN}",
+        "//mcp",
+    ],
+)
+def test_path_token_rejects(path):
+    app.main(["--transport", "http"])
+    with TestClient(
+        app.build_http_app(TOKEN, allow_path_token=True),
+        base_url="http://localhost:8000",
+    ) as client:
+        response = client.post(path, headers=HEADERS, json=INITIALIZE)
+        assert response.status_code == 401
+        assert "serverInfo" not in response.text
+
+
+def test_path_token_ignored_by_default():
+    app.main(["--transport", "http"])
+    with TestClient(
+        app.build_http_app(TOKEN), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post(f"/{TOKEN}/mcp", headers=HEADERS, json=INITIALIZE)
+        assert response.status_code == 401
+
+
+def test_path_token_keeps_host_validation():
+    app.main(["--transport", "http"])
+    with TestClient(
+        app.build_http_app(TOKEN, allow_path_token=True),
+        base_url="http://localhost:8000",
+    ) as client:
+        response = client.post(
+            f"/{TOKEN}/mcp",
+            headers={**HEADERS, "Host": "evil.example"},
             json=INITIALIZE,
         )
         assert response.status_code == 421

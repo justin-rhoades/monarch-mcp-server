@@ -9,6 +9,13 @@ that does not carry ``Authorization: Bearer <token>``.
 
 The token is read from the environment only, never from a CLI flag, because
 process arguments are visible to every local user through ``ps``.
+
+Some clients cannot send custom headers: claude.ai custom connectors (and so
+the Claude mobile apps) take only a URL and support OAuth or no auth. Setting
+``MONARCH_MCP_AUTH_TOKEN_IN_PATH=true`` additionally accepts the token as the
+first path segment, so ``https://host/<token>/mcp`` works without a header.
+It is opt-in because a URL is stored and logged in more places than a header,
+Cloud Run's own request log included.
 """
 
 import hmac
@@ -16,6 +23,7 @@ import json
 from typing import Any, Awaitable, Callable, MutableMapping
 
 ENV_VAR = "MONARCH_MCP_AUTH_TOKEN"
+PATH_ENV_VAR = "MONARCH_MCP_AUTH_TOKEN_IN_PATH"
 
 # A short token is guessable over a public endpoint with no rate limit. 32
 # characters is what `openssl rand -hex 16` produces, so the floor costs nothing
@@ -39,6 +47,18 @@ def _presented_token(scope: Scope) -> bytes | None:
     return None
 
 
+def _strip_path_token(scope: Scope, token: bytes) -> Scope | None:
+    """The scope with a leading ``/<token>`` removed, or None if it has none."""
+    raw_path: bytes = scope.get("raw_path") or scope["path"].encode("utf-8")
+    segment, slash, rest = raw_path[1:].partition(b"/")
+    if not slash or not hmac.compare_digest(segment, token):
+        return None
+    stripped = dict(scope)
+    stripped["raw_path"] = b"/" + rest
+    stripped["path"] = "/" + scope["path"][1:].partition("/")[2]
+    return stripped
+
+
 class BearerAuthMiddleware:
     """Reject HTTP requests whose bearer token does not match.
 
@@ -47,9 +67,10 @@ class BearerAuthMiddleware:
     manager) pass straight through.
     """
 
-    def __init__(self, app: ASGIApp, token: str) -> None:
+    def __init__(self, app: ASGIApp, token: str, *, allow_path: bool = False) -> None:
         self._app = app
         self._token = token.encode("utf-8")
+        self._allow_path = allow_path
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -63,6 +84,12 @@ class BearerAuthMiddleware:
         if presented is not None and hmac.compare_digest(presented, self._token):
             await self._app(scope, receive, send)
             return
+
+        if self._allow_path:
+            stripped = _strip_path_token(scope, self._token)
+            if stripped is not None:
+                await self._app(stripped, receive, send)
+                return
 
         body = json.dumps({"error": "unauthorized"}).encode("utf-8")
         await send(

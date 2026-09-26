@@ -417,7 +417,22 @@ logged in to it.
    ```
 
    The client must be able to send a custom header. Clients that only support
-   OAuth for remote servers cannot use this setup.
+   OAuth for remote servers, such as claude.ai custom connectors and so the
+   Claude mobile apps, need the token in the URL instead (next step).
+
+8. Optional, for clients that cannot send headers: accept the token as the
+   first path segment, then add `$URL/<token>/mcp` as a connector with no
+   authentication:
+
+   ```bash
+   gcloud run services update monarch-mcp \
+     --update-env-vars MONARCH_MCP_AUTH_TOKEN_IN_PATH=true
+   ```
+
+   The header keeps working. A URL is kept in more places than a header: the
+   client stores it, and Cloud Run's request log records it in your project's
+   Cloud Logging (the server turns off its own access log in this mode).
+   Anyone with the URL has the token, so rotate the secret if it leaks.
 
 When the Monarch session eventually stops working, log in locally again and
 roll the secret; new instances pick up the latest version:
@@ -454,6 +469,7 @@ Connect an MCP client using Streamable HTTP to `http://127.0.0.1:8000/mcp`.
 | Additional allowed Host headers    | `--allowed-host` (repeatable)   | `MONARCH_MCP_ALLOWED_HOSTS` (comma-separated)   | None; loopback hosts are always allowed        |
 | Additional allowed browser Origins | `--allowed-origin` (repeatable) | `MONARCH_MCP_ALLOWED_ORIGINS` (comma-separated) | None; HTTP loopback origins are always allowed |
 | Required bearer token              | None (environment only)         | `MONARCH_MCP_AUTH_TOKEN` (32+ characters)       | None; requests are not authenticated           |
+| Also accept token as path prefix  | None (environment only)         | `MONARCH_MCP_AUTH_TOKEN_IN_PATH` (`true`)        | Off; `/<token>/mcp` is rejected                 |
 | Session when none is stored        | None (environment only)         | `MONARCH_MCP_SESSION` (from `export_session.py`) | None                                           |
 
 CLI flags override their environment settings.
