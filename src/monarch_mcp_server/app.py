@@ -3,11 +3,15 @@
 import argparse
 import logging
 import os
+from typing import Any
 
 try:  # mcp >= 2.0 renamed FastMCP to MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP
 except ImportError:  # mcp < 2.0
     from mcp.server.fastmcp import FastMCP
+
+from monarch_mcp_server.http_auth import ENV_VAR as AUTH_ENV_VAR
+from monarch_mcp_server.http_auth import MIN_TOKEN_LENGTH, BearerAuthMiddleware
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +47,11 @@ def _port(value: str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError("port must be between 1 and 65535")
     return port
+
+
+def build_http_app(auth_token: str) -> Any:
+    """The Streamable HTTP ASGI app, wrapped in the bearer token check."""
+    return BearerAuthMiddleware(mcp.streamable_http_app(), auth_token)
 
 
 def _env_list(name: str) -> list[str]:
@@ -92,6 +101,16 @@ def main(argv: list[str] | None = None) -> None:
     if not args.host.strip():
         parser.error("HTTP host must not be empty")
 
+    # STDIO has no network listener to protect, so the token only applies to HTTP.
+    auth_token = (
+        os.environ.get(AUTH_ENV_VAR, "").strip() if args.transport != "stdio" else ""
+    )
+    if auth_token and len(auth_token) < MIN_TOKEN_LENGTH:
+        parser.error(
+            f"{AUTH_ENV_VAR} must be at least {MIN_TOKEN_LENGTH} characters; "
+            "generate one with: openssl rand -hex 32"
+        )
+
     if args.transport != "stdio":
         from mcp.server.transport_security import TransportSecuritySettings
 
@@ -128,10 +147,35 @@ def main(argv: list[str] | None = None) -> None:
             ],
         )
 
+    if (
+        args.transport != "stdio"
+        and not auth_token
+        and args.host not in ("127.0.0.1", "localhost", "::1")
+    ):
+        logger.warning(
+            "Listening on %s without %s set: any client that can reach this "
+            "port gets full access to the saved Monarch session. That is fine "
+            "if the port is published only on loopback or behind an "
+            "authenticating proxy; otherwise set %s.",
+            args.host,
+            AUTH_ENV_VAR,
+            AUTH_ENV_VAR,
+        )
+
     logger.info("Starting Monarch Money MCP Server (%s)...", args.transport)
     try:
         if args.transport == "stdio":
             mcp.run()
+        elif auth_token:
+            import uvicorn
+
+            logger.info("Bearer token authentication enabled")
+            uvicorn.run(
+                build_http_app(auth_token),
+                host=mcp.settings.host,
+                port=mcp.settings.port,
+                log_level=mcp.settings.log_level.lower(),
+            )
         else:
             mcp.run(transport="streamable-http")
     except Exception as e:

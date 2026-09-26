@@ -11,7 +11,14 @@ from monarch_mcp_server import app
 
 @pytest.fixture(autouse=True)
 def isolate_transport(monkeypatch):
-    for suffix in ("TRANSPORT", "HOST", "PORT", "ALLOWED_HOSTS", "ALLOWED_ORIGINS"):
+    for suffix in (
+        "TRANSPORT",
+        "HOST",
+        "PORT",
+        "ALLOWED_HOSTS",
+        "ALLOWED_ORIGINS",
+        "AUTH_TOKEN",
+    ):
         monkeypatch.delenv(f"MONARCH_MCP_{suffix}", raising=False)
     monkeypatch.setattr(app.mcp, "settings", app.mcp.settings.model_copy(deep=True))
     monkeypatch.setattr(app.mcp, "_session_manager", None)
@@ -206,3 +213,97 @@ def test_http_allows_configured_remote_host_and_origin():
             },
         )
         assert "serverInfo" in rpc_result(response)
+
+
+TOKEN = "a" * 64
+
+
+def test_auth_token_runs_wrapped_app(monkeypatch, isolate_transport):
+    import uvicorn
+
+    from monarch_mcp_server.http_auth import BearerAuthMiddleware
+
+    served = Mock()
+    monkeypatch.setattr(uvicorn, "run", served)
+    monkeypatch.setenv("MONARCH_MCP_AUTH_TOKEN", TOKEN)
+    app.main(["--transport", "http", "--host", "0.0.0.0", "--port", "9002"])
+    isolate_transport.assert_not_called()
+    served.assert_called_once()
+    assert isinstance(served.call_args.args[0], BearerAuthMiddleware)
+    assert served.call_args.kwargs["host"] == "0.0.0.0"
+    assert served.call_args.kwargs["port"] == 9002
+
+
+def test_short_auth_token_fails(monkeypatch, isolate_transport):
+    monkeypatch.setenv("MONARCH_MCP_AUTH_TOKEN", "too-short")
+    with pytest.raises(SystemExit) as exc:
+        app.main(["--transport", "http"])
+    assert exc.value.code == 2
+    isolate_transport.assert_not_called()
+
+
+@pytest.mark.parametrize("token", [TOKEN, "too-short"])
+def test_auth_token_ignored_for_stdio(monkeypatch, isolate_transport, token):
+    monkeypatch.setenv("MONARCH_MCP_AUTH_TOKEN", token)
+    app.main([])
+    isolate_transport.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        None,
+        "",
+        "Bearer",
+        "Bearer ",
+        f"Basic {TOKEN}",
+        "Bearer " + "b" * 64,
+        f"Bearer {TOKEN}x",
+        f"Bearer {TOKEN[:-1]}",
+    ],
+)
+def test_bearer_auth_rejects(authorization):
+    app.main(["--transport", "http"])
+    headers = dict(HEADERS)
+    if authorization is not None:
+        headers["Authorization"] = authorization
+    with TestClient(
+        app.build_http_app(TOKEN), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post("/mcp", headers=headers, json=INITIALIZE)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert "serverInfo" not in response.text
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER"])
+def test_bearer_auth_accepts_matching_token(scheme):
+    app.main(["--transport", "http"])
+    with TestClient(
+        app.build_http_app(TOKEN), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post(
+            "/mcp",
+            headers={**HEADERS, "Authorization": f"{scheme} {TOKEN}"},
+            json=INITIALIZE,
+        )
+        assert rpc_result(response)["serverInfo"]["name"] == (
+            "Monarch Money MCP Server"
+        )
+
+
+def test_bearer_auth_keeps_host_validation():
+    app.main(["--transport", "http"])
+    with TestClient(
+        app.build_http_app(TOKEN), base_url="http://localhost:8000"
+    ) as client:
+        response = client.post(
+            "/mcp",
+            headers={
+                **HEADERS,
+                "Authorization": f"Bearer {TOKEN}",
+                "Host": "evil.example",
+            },
+            json=INITIALIZE,
+        )
+        assert response.status_code == 421

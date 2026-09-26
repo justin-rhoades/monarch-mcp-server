@@ -112,8 +112,18 @@ class TestLoginWithTokenInteractive:
 
 class TestLogout:
     def test_clears_session(self, no_session_save):
+        no_session_save.env_session_present.return_value = False
         result = asyncio.run(auth.logout())
-        assert "Cleared" in result
+        assert result == "Cleared stored Monarch session."
+        no_session_save.delete_token.assert_called_once()
+
+    def test_warns_when_environment_session_remains(self, no_session_save):
+        """Logout cannot unset an environment variable, so it must not
+        report a full sign-out while that session keeps working."""
+        no_session_save.env_session_present.return_value = True
+        result = asyncio.run(auth.logout())
+        assert "MONARCH_MCP_SESSION" in result
+        assert "remains active" in result
         no_session_save.delete_token.assert_called_once()
 
 

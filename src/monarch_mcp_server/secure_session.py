@@ -50,6 +50,12 @@ _CHUNK_GENERATIONS = (0, 1)
 # returns a value for every username can't loop forever.
 _MAX_CHUNKS = 256
 
+# Read-only session source for hosts with neither a keyring nor a persistent
+# disk, such as Cloud Run, where the value is injected from a secret manager.
+# Holds the same JSON blob the keyring stores (see export_session.py). Tried
+# last, so a session saved inside the running process still takes effect.
+SESSION_ENV_VAR = "MONARCH_MCP_SESSION"
+
 # File-based fallback location
 _TOKEN_DIR = Path.home() / ".monarch-mcp-server"
 _TOKEN_FILE = _TOKEN_DIR / "token"
@@ -577,6 +583,7 @@ class SecureMonarchSession:
         for load_raw, source in (
             (self._keyring_load_guarded, "keyring"),
             (self._load_token_file, "file fallback"),
+            (self._load_env_session, SESSION_ENV_VAR),
         ):
             raw_session = load_raw()
             if not raw_session:
@@ -592,6 +599,18 @@ class SecureMonarchSession:
 
         logger.info("🔍 No session found")
         return None
+
+    @staticmethod
+    def _load_env_session() -> Optional[str]:
+        return os.environ.get(SESSION_ENV_VAR, "").strip() or None
+
+    @staticmethod
+    def env_session_present() -> bool:
+        """Whether a session is supplied through the environment.
+
+        Deleting stored sessions cannot remove it, so logout has to say so.
+        """
+        return bool(os.environ.get(SESSION_ENV_VAR, "").strip())
 
     def _keyring_load_guarded(self) -> Optional[str]:
         """_keyring_load, but never raising, and a no-op without a keyring."""

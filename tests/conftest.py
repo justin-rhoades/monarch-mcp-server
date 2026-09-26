@@ -48,6 +48,8 @@ def isolate_credential_storage(monkeypatch, tmp_path):
         (service, username), None
     )
     monkeypatch.setitem(sys.modules, "keyring", fake)
+    # A session exported for hosting must not leak into the suite either.
+    monkeypatch.delenv(ss_module.SESSION_ENV_VAR, raising=False)
 
     yield
 
