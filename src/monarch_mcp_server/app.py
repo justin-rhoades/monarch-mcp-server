@@ -11,6 +11,7 @@ except ImportError:  # mcp < 2.0
     from mcp.server.fastmcp import FastMCP
 
 from monarch_mcp_server.http_auth import ENV_VAR as AUTH_ENV_VAR
+from monarch_mcp_server.http_auth import PATH_ENV_VAR as AUTH_PATH_ENV_VAR
 from monarch_mcp_server.http_auth import MIN_TOKEN_LENGTH, BearerAuthMiddleware
 
 # Configure logging
@@ -49,9 +50,11 @@ def _port(value: str) -> int:
     return port
 
 
-def build_http_app(auth_token: str) -> Any:
+def build_http_app(auth_token: str, *, allow_path_token: bool = False) -> Any:
     """The Streamable HTTP ASGI app, wrapped in the bearer token check."""
-    return BearerAuthMiddleware(mcp.streamable_http_app(), auth_token)
+    return BearerAuthMiddleware(
+        mcp.streamable_http_app(), auth_token, allow_path=allow_path_token
+    )
 
 
 def _env_list(name: str) -> list[str]:
@@ -169,12 +172,19 @@ def main(argv: list[str] | None = None) -> None:
         elif auth_token:
             import uvicorn
 
+            path_setting = os.environ.get(AUTH_PATH_ENV_VAR, "").strip().lower()
+            allow_path_token = path_setting in ("1", "true", "yes")
             logger.info("Bearer token authentication enabled")
+            if allow_path_token:
+                logger.info("Bearer token also accepted as the first path segment")
             uvicorn.run(
-                build_http_app(auth_token),
+                build_http_app(auth_token, allow_path_token=allow_path_token),
                 host=mcp.settings.host,
                 port=mcp.settings.port,
                 log_level=mcp.settings.log_level.lower(),
+                # The access log prints request paths, which would put a
+                # path-embedded token into the server's logs.
+                access_log=not allow_path_token,
             )
         else:
             mcp.run(transport="streamable-http")
