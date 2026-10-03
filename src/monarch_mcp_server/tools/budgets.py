@@ -10,7 +10,12 @@ from monarchmoney import MonarchMoney
 
 from monarch_mcp_server.app import mcp
 from monarch_mcp_server.client import get_monarch_client
-from monarch_mcp_server.helpers import json_success, json_error
+from monarch_mcp_server.helpers import (
+    json_error,
+    json_rejected,
+    json_success,
+    payload_errors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -219,3 +224,71 @@ async def set_budget_amount(
         })
     except Exception as e:
         return json_error("set_budget_amount", e)
+
+
+@mcp.tool()
+async def update_flexible_budget(
+    amount: float, start_date: Optional[str] = None
+) -> str:
+    """Set the Flexible budget bucket amount for one month."""
+    try:
+        client = await get_monarch_client()
+        kwargs: Dict[str, Any] = {"amount": amount}
+        if start_date is not None:
+            kwargs["start_date"] = start_date
+        result = await client.update_flexible_budget(**kwargs)
+        errors = payload_errors(result, "updateFlexibleBudget")
+        if errors:
+            return json_rejected("update_flexible_budget", errors)
+        return json_success({"requested": kwargs, "result": result})
+    except Exception as e:
+        return json_error("update_flexible_budget", e)
+
+
+@mcp.tool()
+async def update_flex_rollover_settings(
+    rollover_enabled: bool,
+    start_month: Optional[str] = None,
+    starting_balance: Optional[float] = None,
+) -> str:
+    """Update Flexible-budget rollover behavior.
+
+    Changing the start month or balance restarts rollover accounting, so those
+    values are only sent when explicitly supplied.
+    """
+    try:
+        client = await get_monarch_client()
+        kwargs: Dict[str, Any] = {"rollover_enabled": rollover_enabled}
+        if start_month is not None:
+            kwargs["start_month"] = start_month
+        if starting_balance is not None:
+            kwargs["starting_balance"] = starting_balance
+        result = await client.update_flex_rollover_settings(**kwargs)
+        errors = payload_errors(result, "updateFlexRolloverSettings")
+        if errors:
+            return json_rejected("update_flex_rollover_settings", errors)
+        return json_success({"requested": kwargs, "result": result})
+    except Exception as e:
+        return json_error("update_flex_rollover_settings", e)
+
+
+@mcp.tool()
+async def reset_budget(month: str, confirm: bool = False) -> str:
+    """Reset a month's budget to Monarch's defaults.
+
+    This discards overrides for the selected month and requires explicit
+    confirmation.
+    """
+    if not confirm:
+        return json_error(
+            "reset_budget", ValueError("Set confirm=true to reset this month's budget")
+        )
+    try:
+        client = await get_monarch_client()
+        result = await client.reset_budget(start_date=month)
+        errors = payload_errors(result, "resetBudget")
+        if errors:
+            return json_rejected("reset_budget", errors)
+        return json_success({"reset": True, "month": month, "result": result})
+    except Exception as e:
+        return json_error("reset_budget", e)

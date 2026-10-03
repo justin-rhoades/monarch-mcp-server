@@ -95,6 +95,54 @@ async def create_transaction_category(
         return json_error("create_transaction_category", e)
 
 
+@mcp.tool()
+async def delete_transaction_category(category_id: str, confirm: bool = False) -> str:
+    """Permanently delete one custom transaction category.
+
+    Monarch may reject protected/system categories. Existing transactions can
+    be recategorized by Monarch, so explicit confirmation is required.
+    """
+    if not confirm:
+        return json_error(
+            "delete_transaction_category",
+            ValueError("Set confirm=true to permanently delete this category"),
+        )
+    try:
+        client = await get_monarch_client()
+        result = await client.delete_transaction_category(category_id=category_id)
+        errors = payload_errors(result, "deleteCategory")
+        if errors:
+            return json_rejected("delete_transaction_category", errors)
+        return json_success({"deleted": [category_id], "result": result})
+    except Exception as e:
+        return json_error("delete_transaction_category", e)
+
+
+@mcp.tool()
+async def delete_transaction_categories(
+    category_ids: List[str], confirm: bool = False
+) -> str:
+    """Permanently delete multiple custom transaction categories."""
+    if not category_ids:
+        return json_error(
+            "delete_transaction_categories", ValueError("category_ids must not be empty")
+        )
+    if not confirm:
+        return json_error(
+            "delete_transaction_categories",
+            ValueError("Set confirm=true to permanently delete these categories"),
+        )
+    try:
+        client = await get_monarch_client()
+        result = await client.delete_transaction_categories(category_ids=category_ids)
+        errors = payload_errors(result, "deleteCategories")
+        if errors:
+            return json_rejected("delete_transaction_categories", errors)
+        return json_success({"deleted": category_ids, "result": result})
+    except Exception as e:
+        return json_error("delete_transaction_categories", e)
+
+
 # ---------------------------------------------------------------------------
 # GraphQL constants (custom queries not in monarchmoney library)
 # ---------------------------------------------------------------------------
@@ -647,5 +695,4 @@ async def get_cashflow_by_month(
         )
     except Exception as e:
         return json_error("get_cashflow_by_month", e)
-
 
