@@ -104,3 +104,30 @@ class BearerAuthMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+
+class PathTokenMiddleware:
+    """Turn a ``/<token>/...`` path into ``Authorization: Bearer <token>``.
+
+    Used with OAuth, where the SDK's own middleware checks bearer tokens: this
+    keeps the path form working for clients added before OAuth, by handing the
+    token to that check rather than deciding anything itself.
+    """
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self._app = app
+        self._token = token.encode("utf-8")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            stripped = _strip_path_token(scope, self._token)
+            if stripped is not None:
+                headers = [
+                    (name, value)
+                    for name, value in stripped.get("headers", [])
+                    if name.lower() != b"authorization"
+                ]
+                headers.append((b"authorization", b"Bearer " + self._token))
+                stripped["headers"] = headers
+                scope = stripped
+        await self._app(scope, receive, send)
