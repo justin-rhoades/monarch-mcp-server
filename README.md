@@ -433,6 +433,40 @@ logged in to it.
    Cloud Logging (the server turns off its own access log in this mode).
    Anyone with the URL has the token, so rotate the secret if it leaks.
 
+9. Better, for claude.ai, the Claude apps and ChatGPT: sign in with Google.
+   The server becomes an OAuth authorization server that hands sign-in to
+   Google and issues tokens only to the emails you list, so the connector URL
+   is just `$URL/mcp` with no secret in it.
+
+   In the Cloud console, under Google Auth Platform, create an External app
+   (leave it in Testing and add yourself as a test user, or publish it: it
+   only asks for your email) and a **Web application** client whose
+   authorized redirect URI is `$URL/oauth/google/callback`. Store its client
+   secret as `google-oauth-client-secret`, then:
+
+   ```bash
+   openssl rand -hex 32 | tr -d '\n' \
+     | gcloud secrets create monarch-oauth-signing-key --data-file=-
+   for secret in google-oauth-client-secret monarch-oauth-signing-key; do
+     gcloud secrets add-iam-policy-binding "$secret" \
+       --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor
+   done
+   gcloud run services update monarch-mcp \
+     --update-secrets MONARCH_MCP_GOOGLE_CLIENT_SECRET=google-oauth-client-secret:latest,MONARCH_MCP_OAUTH_SIGNING_KEY=monarch-oauth-signing-key:latest \
+     --update-env-vars "^|^MONARCH_MCP_PUBLIC_URL=$URL|MONARCH_MCP_GOOGLE_CLIENT_ID=YOUR_CLIENT_ID|MONARCH_MCP_ALLOWED_EMAILS=you@gmail.com"
+   ```
+
+   Add `$URL/mcp` as a connector with no client ID or secret: the client
+   registers itself and opens Google sign-in. Nothing is stored server side,
+   because clients, codes and tokens are all signed with the signing key.
+   Access tokens last an hour and refresh tokens 30 days. Removing an email
+   from `MONARCH_MCP_ALLOWED_EMAILS` locks it out at once; adding a new
+   version of `monarch-oauth-signing-key` signs every client out.
+   `MONARCH_MCP_AUTH_TOKEN` keeps working alongside OAuth for clients that
+   send a header. Once your connectors use OAuth, remove
+   `MONARCH_MCP_AUTH_TOKEN_IN_PATH` and roll `monarch-mcp-token` so no
+   old token URL still works.
+
 When the Monarch session eventually stops working, log in locally again and
 roll the secret; new instances pick up the latest version:
 
@@ -469,6 +503,11 @@ Connect an MCP client using Streamable HTTP to `http://127.0.0.1:8000/mcp`.
 | Additional allowed browser Origins | `--allowed-origin` (repeatable) | `MONARCH_MCP_ALLOWED_ORIGINS` (comma-separated) | None; HTTP loopback origins are always allowed |
 | Required bearer token              | None (environment only)         | `MONARCH_MCP_AUTH_TOKEN` (32+ characters)       | None; requests are not authenticated           |
 | Also accept token as path prefix  | None (environment only)         | `MONARCH_MCP_AUTH_TOKEN_IN_PATH` (`true`)        | Off; `/<token>/mcp` is rejected                 |
+| OAuth: Google client ID           | None (environment only)         | `MONARCH_MCP_GOOGLE_CLIENT_ID`                   | Unset; OAuth is off                            |
+| OAuth: Google client secret       | None (environment only)         | `MONARCH_MCP_GOOGLE_CLIENT_SECRET`               | Required with a client ID                      |
+| OAuth: public base URL            | None (environment only)         | `MONARCH_MCP_PUBLIC_URL` (`https://...`)         | Required with a client ID                      |
+| OAuth: token signing key          | None (environment only)         | `MONARCH_MCP_OAUTH_SIGNING_KEY` (32+ characters) | Required with a client ID                      |
+| OAuth: allowed Google accounts    | None (environment only)         | `MONARCH_MCP_ALLOWED_EMAILS` (comma-separated)   | Required with a client ID                      |
 | Session when none is stored        | None (environment only)         | `MONARCH_MCP_SESSION` (from `export_session.py`) | None                                           |
 
 CLI flags override their environment settings.

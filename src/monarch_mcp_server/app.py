@@ -11,8 +11,13 @@ except ImportError:  # mcp < 2.0
     from mcp.server.fastmcp import FastMCP
 
 from monarch_mcp_server.http_auth import ENV_VAR as AUTH_ENV_VAR
+from monarch_mcp_server import oauth
 from monarch_mcp_server.http_auth import PATH_ENV_VAR as AUTH_PATH_ENV_VAR
-from monarch_mcp_server.http_auth import MIN_TOKEN_LENGTH, BearerAuthMiddleware
+from monarch_mcp_server.http_auth import (
+    MIN_TOKEN_LENGTH,
+    BearerAuthMiddleware,
+    PathTokenMiddleware,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,10 +55,42 @@ def _port(value: str) -> int:
     return port
 
 
-def build_http_app(auth_token: str, *, allow_path_token: bool = False) -> Any:
-    """The Streamable HTTP ASGI app, wrapped in the bearer token check."""
-    return BearerAuthMiddleware(
-        mcp.streamable_http_app(), auth_token, allow_path=allow_path_token
+def build_http_app(
+    auth_token: str,
+    *,
+    allow_path_token: bool = False,
+    oauth_config: "oauth.OAuthConfig | None" = None,
+) -> Any:
+    """The Streamable HTTP ASGI app, wrapped in its authentication.
+
+    With OAuth configured, the SDK checks every bearer token and the static
+    token is accepted as one of them; otherwise the static token is the only
+    credential.
+    """
+    if oauth_config is None:
+        return BearerAuthMiddleware(
+            mcp.streamable_http_app(), auth_token, allow_path=allow_path_token
+        )
+    provider = oauth.configure(mcp, oauth_config, auth_token)
+    app = mcp.streamable_http_app()
+    oauth.add_routes(app, provider)
+    if allow_path_token and auth_token:
+        return PathTokenMiddleware(app, auth_token)
+    return app
+
+
+def _oauth_config() -> "oauth.OAuthConfig | None":
+    client_id = os.environ.get(oauth.GOOGLE_CLIENT_ID_ENV, "").strip()
+    if not client_id:
+        return None
+    return oauth.OAuthConfig(
+        public_url=os.environ.get(oauth.PUBLIC_URL_ENV, "").strip().rstrip("/"),
+        google_client_id=client_id,
+        google_client_secret=os.environ.get(oauth.GOOGLE_CLIENT_SECRET_ENV, "").strip(),
+        signing_key=os.environ.get(oauth.SIGNING_KEY_ENV, "").strip(),
+        allowed_emails=frozenset(
+            email.lower() for email in _env_list(oauth.ALLOWED_EMAILS_ENV)
+        ),
     )
 
 
@@ -113,6 +150,11 @@ def main(argv: list[str] | None = None) -> None:
             f"{AUTH_ENV_VAR} must be at least {MIN_TOKEN_LENGTH} characters; "
             "generate one with: openssl rand -hex 32"
         )
+    oauth_config = _oauth_config() if args.transport != "stdio" else None
+    if oauth_config is not None:
+        problems = oauth.config_problems(oauth_config)
+        if problems:
+            parser.error("; ".join(problems))
 
     if args.transport != "stdio":
         from mcp.server.transport_security import TransportSecuritySettings
@@ -153,6 +195,7 @@ def main(argv: list[str] | None = None) -> None:
     if (
         args.transport != "stdio"
         and not auth_token
+        and oauth_config is None
         and args.host not in ("127.0.0.1", "localhost", "::1")
     ):
         logger.warning(
@@ -169,16 +212,26 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.transport == "stdio":
             mcp.run()
-        elif auth_token:
+        elif auth_token or oauth_config is not None:
             import uvicorn
 
             path_setting = os.environ.get(AUTH_PATH_ENV_VAR, "").strip().lower()
-            allow_path_token = path_setting in ("1", "true", "yes")
-            logger.info("Bearer token authentication enabled")
+            allow_path_token = bool(auth_token) and path_setting in ("1", "true", "yes")
+            if oauth_config is not None:
+                logger.info(
+                    "OAuth enabled: Google sign-in for %d allowed account(s)",
+                    len(oauth_config.allowed_emails),
+                )
+            if auth_token:
+                logger.info("Bearer token authentication enabled")
             if allow_path_token:
                 logger.info("Bearer token also accepted as the first path segment")
             uvicorn.run(
-                build_http_app(auth_token, allow_path_token=allow_path_token),
+                build_http_app(
+                    auth_token,
+                    allow_path_token=allow_path_token,
+                    oauth_config=oauth_config,
+                ),
                 host=mcp.settings.host,
                 port=mcp.settings.port,
                 log_level=mcp.settings.log_level.lower(),
