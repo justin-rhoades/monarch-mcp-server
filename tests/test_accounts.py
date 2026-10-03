@@ -6,6 +6,7 @@ from monarch_mcp_server.tools.accounts import (
     get_accounts,
     get_account_holdings,
     refresh_accounts,
+    refresh_accounts_and_wait,
     update_account,
     get_account_balance_history,
     upload_account_balance_history,
@@ -192,6 +193,35 @@ class TestRefreshAccounts:
         mock_monarch_client.request_accounts_refresh.side_effect = Exception("Timeout")
         result = await refresh_accounts(account_ids=["acc-1"])
         assert "refresh_accounts" in result
+
+
+class TestRefreshAccountsAndWait:
+    async def test_passes_wait_controls(self, mock_monarch_client):
+        mock_monarch_client.request_accounts_refresh_and_wait.return_value = {
+            "complete": True
+        }
+        result = json.loads(
+            await refresh_accounts_and_wait(
+                account_ids=["acc-1"], timeout=120, delay=5
+            )
+        )
+        assert result == {"complete": True}
+        mock_monarch_client.request_accounts_refresh_and_wait.assert_awaited_once_with(
+            account_ids=["acc-1"], timeout=120, delay=5
+        )
+
+    async def test_empty_ids_mean_all_accounts(self, mock_monarch_client):
+        await refresh_accounts_and_wait(account_ids=[])
+        mock_monarch_client.request_accounts_refresh_and_wait.assert_awaited_once_with(
+            account_ids=None, timeout=300, delay=10
+        )
+
+    async def test_rejects_invalid_polling_controls(self, mock_monarch_client):
+        timeout_result = json.loads(await refresh_accounts_and_wait(timeout=0))
+        delay_result = json.loads(await refresh_accounts_and_wait(delay=0))
+        assert "timeout must be greater than 0" in timeout_result["message"]
+        assert "delay must be greater than 0" in delay_result["message"]
+        mock_monarch_client.request_accounts_refresh_and_wait.assert_not_awaited()
 
 
 class TestGetAccountBalanceHistory:

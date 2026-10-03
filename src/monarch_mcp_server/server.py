@@ -24,7 +24,10 @@ from monarch_mcp_server.tools.identity import (  # noqa: F401
 )
 from monarch_mcp_server.tools.accounts import (  # noqa: F401
     get_accounts,
+    create_manual_account,
+    delete_account,
     refresh_accounts,
+    refresh_accounts_and_wait,
     get_account_holdings,
     get_account_balance_history,
     upload_account_balance_history,
@@ -70,6 +73,8 @@ from monarch_mcp_server.tools.categories import (  # noqa: F401
     get_transaction_categories,
     get_transaction_category_groups,
     create_transaction_category,
+    delete_transaction_category,
+    delete_transaction_categories,
     update_category,
     get_category_details,
     get_cashflow_by_month,
@@ -77,6 +82,13 @@ from monarch_mcp_server.tools.categories import (  # noqa: F401
 from monarch_mcp_server.tools.budgets import (  # noqa: F401
     get_budgets,
     set_budget_amount,
+    update_flexible_budget,
+    update_flex_rollover_settings,
+    reset_budget,
+)
+from monarch_mcp_server.tools.attachments import (  # noqa: F401
+    upload_transaction_attachment,
+    upload_receipt_to_inbox,
 )
 from monarch_mcp_server.tools.financial import (  # noqa: F401
     get_cashflow,

@@ -20,6 +20,63 @@ from monarch_mcp_server.helpers import (
 logger = logging.getLogger(__name__)
 
 
+@mcp.tool()
+async def create_manual_account(
+    name: str,
+    account_type: str,
+    account_sub_type: str,
+    balance: float = 0,
+    include_in_net_worth: bool = True,
+) -> str:
+    """Create a manually maintained Monarch account.
+
+    Use ``get_account_type_options`` in Monarch's UI when unsure of the type
+    and subtype values. Manual accounts do not sync with an institution.
+    """
+    try:
+        if not name.strip():
+            raise ValueError("name must not be blank")
+        if not account_type.strip() or not account_sub_type.strip():
+            raise ValueError("account_type and account_sub_type must not be blank")
+        client = await get_monarch_client()
+        result = await client.create_manual_account(
+            account_type=account_type,
+            account_sub_type=account_sub_type,
+            is_in_net_worth=include_in_net_worth,
+            account_name=name,
+            account_balance=balance,
+        )
+        errors = payload_errors(result, "createManualAccount", "createAccount")
+        if errors:
+            return json_rejected("create_manual_account", errors)
+        return json_success(result)
+    except Exception as e:
+        return json_error("create_manual_account", e)
+
+
+@mcp.tool()
+async def delete_account(account_id: str, confirm: bool = False) -> str:
+    """Permanently delete an account and its associated Monarch data.
+
+    This operation cannot be undone. ``confirm`` must explicitly be true so a
+    model cannot delete an account merely by discovering its ID.
+    """
+    if not confirm:
+        return json_error(
+            "delete_account",
+            ValueError("Set confirm=true to permanently delete this account"),
+        )
+    try:
+        client = await get_monarch_client()
+        result = await client.delete_account(account_id=account_id)
+        errors = payload_errors(result, "deleteAccount")
+        if errors:
+            return json_rejected("delete_account", errors)
+        return json_success({"deleted": True, "account_id": account_id, "result": result})
+    except Exception as e:
+        return json_error("delete_account", e)
+
+
 class BalanceCorrections(RootModel[Dict[date, Decimal]]):
     """Validates the corrections payload for upload_account_balance_history.
 
@@ -269,6 +326,43 @@ async def refresh_accounts(account_ids: Optional[List[str]] = None) -> str:
         return json_success(result)
     except Exception as e:
         return json_error("refresh_accounts", e)
+
+
+@mcp.tool()
+async def refresh_accounts_and_wait(
+    account_ids: Optional[List[str]] = None,
+    timeout: int = 300,
+    delay: int = 10,
+) -> str:
+    """Request an account refresh and wait for Monarch to finish it.
+
+    Unlike ``refresh_accounts``, this call blocks until the refresh completes,
+    stops running, or reaches the timeout.
+
+    Args:
+        account_ids: Specific account IDs to refresh. If omitted or empty,
+            Monarch refreshes all eligible linked accounts.
+        timeout: Maximum number of seconds to wait (default: 300).
+        delay: Seconds between refresh-status checks (default: 10).
+    """
+    if timeout <= 0:
+        return json_error(
+            "refresh_accounts_and_wait", ValueError("timeout must be greater than 0")
+        )
+    if delay <= 0:
+        return json_error(
+            "refresh_accounts_and_wait", ValueError("delay must be greater than 0")
+        )
+    try:
+        client = await get_monarch_client()
+        result = await client.request_accounts_refresh_and_wait(
+            account_ids=account_ids or None,
+            timeout=timeout,
+            delay=delay,
+        )
+        return json_success(result)
+    except Exception as e:
+        return json_error("refresh_accounts_and_wait", e)
 
 
 @mcp.tool()
