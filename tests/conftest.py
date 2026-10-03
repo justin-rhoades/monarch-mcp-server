@@ -290,6 +290,7 @@ _TOOL_MODULES = [
     "monarch_mcp_server.client",
     "monarch_mcp_server.tools.auth",
     "monarch_mcp_server.tools.accounts",
+    "monarch_mcp_server.tools.attachments",
     "monarch_mcp_server.tools.transactions",
     "monarch_mcp_server.tools.summaries",
     "monarch_mcp_server.tools.splits",
